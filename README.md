@@ -23,8 +23,10 @@ KYC Agentic Platform is a real-time anomaly detection system for KYC (Know Your 
 
 ## 🏗️ Architecture
 Client → Go API (KYC Ingestor) → Snowflake (Audit Logs)
+
 ↓
 Kafka Topic (kyc-events)
+
 ↓
 Python Anomaly Detector → Alerts / Actions
 
