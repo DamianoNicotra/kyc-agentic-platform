@@ -1,7 +1,7 @@
-
 package main
 
 import (
+    "context"
     "crypto/sha256"
     "database/sql"
     "encoding/hex"
@@ -12,6 +12,7 @@ import (
     "time"
 
     "github.com/gorilla/mux"
+    "github.com/segmentio/kafka-go"
     _ "github.com/snowflakedb/gosnowflake"
 )
 
@@ -26,6 +27,7 @@ type KYCEvent struct {
 
 var db *sql.DB
 var eventsStore []KYCEvent
+var kafkaWriter *kafka.Writer
 
 func initDB() error {
     dsn := fmt.Sprintf(
@@ -44,6 +46,18 @@ func initDB() error {
         return err
     }
     return db.Ping()
+}
+
+func initKafka() {
+    kafkaWriter = &kafka.Writer{
+        Addr:         kafka.TCP("localhost:9092"),
+        Topic:        "kyc-events",
+        Balancer:     &kafka.LeastBytes{},
+        RequiredAcks: kafka.RequireOne,
+        BatchSize:    100,
+        BatchTimeout: 100 * time.Millisecond,
+    }
+    log.Println("Kafka producer initialized")
 }
 
 func getLastHashFromSnowflake(userID string) (string, error) {
@@ -85,6 +99,30 @@ func saveToSnowflake(event KYCEvent, prevHash, currentHash string) {
     }
 }
 
+func publishToKafka(event KYCEvent, prevHash, currentHash string) {
+    eventWithHashes := struct {
+        KYCEvent
+        PrevHash string `json:"prev_hash"`
+        Hash     string `json:"hash"`
+    }{
+        KYCEvent: event,
+        PrevHash: prevHash,
+        Hash:     currentHash,
+    }
+    
+    eventJSON, _ := json.Marshal(eventWithHashes)
+    
+    err := kafkaWriter.WriteMessages(context.Background(), kafka.Message{
+        Key:   []byte(event.UserID),
+        Value: eventJSON,
+    })
+    if err != nil {
+        log.Printf("Kafka error (non-blocking): %v", err)
+    } else {
+        log.Printf("Published to Kafka: user=%s action=%s", event.UserID, event.Action)
+    }
+}
+
 func computeHash(prevHash, userID, action, details, timestamp string) string {
     data := prevHash + userID + action + details + timestamp
     hash := sha256.Sum256([]byte(data))
@@ -115,8 +153,11 @@ func postKYCEvent(w http.ResponseWriter, r *http.Request) {
 
     eventsStore = append(eventsStore, event)
 
-    // Salva in Snowflake in modo non bloccante
+    // Salva in Snowflake (non bloccante)
     go saveToSnowflake(event, prevHash, currentHash)
+    
+    // PUBBLICA SU KAFKA (nuovo!)
+    go publishToKafka(event, prevHash, currentHash)
 
     log.Printf("Event stored: user=%s action=%s hash=%s prev_hash=%s",
         event.UserID, event.Action, currentHash[:8],
@@ -152,15 +193,17 @@ func main() {
         log.Println("Connected to Snowflake")
         defer db.Close()
     }
+    
+    initKafka()
+    defer kafkaWriter.Close()
 
     r := mux.NewRouter()
     r.HandleFunc("/health", healthHandler).Methods("GET")
     r.HandleFunc("/kyc/event", postKYCEvent).Methods("POST")
     r.HandleFunc("/kyc/events", eventsHandler).Methods("GET")
 
-    log.Println("KYC Ingestor starting on :8080")
+    log.Println("KYC Ingestor starting on :8080 (with Kafka producer)")
     if err := http.ListenAndServe(":8080", r); err != nil {
         log.Fatal(err)
     }
 }
-

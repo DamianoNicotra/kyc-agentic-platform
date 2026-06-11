@@ -1,0 +1,16 @@
+FROM flink:1.18-scala_2.12
+
+# Installa Python e crea link simbolico
+RUN apt-get update && apt-get install -y python3 python3-pip python3-venv && \
+    ln -s /usr/bin/python3 /usr/bin/python
+
+# Installa PyFlink
+RUN pip3 install apache-flink==1.18.0
+
+# Copia il job
+COPY flink-jobs/anomaly_detector.py /opt/flink-jobs/
+
+# Scarica il connettore Kafka per Flink
+RUN wget -P /opt/flink/lib/ https://repo1.maven.org/maven2/org/apache/flink/flink-sql-connector-kafka/3.0.2-1.18/flink-sql-connector-kafka-3.0.2-1.18.jar
+
+WORKDIR /opt/flink
